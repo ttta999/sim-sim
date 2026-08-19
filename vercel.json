@@ -1,0 +1,12 @@
+{
+    "rewrites": [
+        { "source": "/api/(.*)", "destination": "/api/index.py" }
+    ],
+    "crons": [
+        {
+            "path": "/api/cron_notify",
+            "schedule": "0 6 * * *",
+            "timezone": "Europe/Riga"
+        }
+    ]
+}

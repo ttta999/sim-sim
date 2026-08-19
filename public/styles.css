@@ -1,0 +1,40 @@
+:root {
+    --tg-theme-bg-color: #ffffff;
+    --tg-theme-text-color: #000000;
+    --tg-theme-hint-color: #999999;
+    --tg-theme-link-color: #2481cc;
+    --tg-theme-button-color: #2481cc;
+    --tg-theme-button-text-color: #ffffff;
+    --tg-theme-secondary-bg-color: #f0f0f0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overscroll-behavior-y: contain;
+}
+
+.card {
+    background: var(--tg-theme-secondary-bg-color);
+    border-radius: 12px;
+    padding: 14px;
+    transition: transform 0.2s;
+}
+.card:active { transform: scale(0.98); }
+
+.days-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 13px;
+}
+.days-red    { background: #fee2e2; color: #991b1b; }
+.days-yellow { background: #fef3c7; color: #92400e; }
+.days-green  { background: #d1fae5; color: #065f46; }
+
+/* Тёмная тема Telegram */
+@media (prefers-color-scheme: dark) {
+    .days-red    { background: #450a0a; color: #fca5a5; }
+    .days-yellow { background: #451a03; color: #fcd34d; }
+    .days-green  { background: #052e16; color: #86efac; }
+}
