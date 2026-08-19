@@ -108,6 +108,20 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+@app.get("/api/debug")
+async def debug():
+    result = {"env": {}}
+    for var in ("TELEGRAM_BOT_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"):
+        val = os.environ.get(var)
+        result["env"][var] = {"present": bool(val), "length": len(val) if val else 0}
+    try:
+        sb = get_supabase()
+        sb.table("cards").select("id").limit(1).execute()
+        result["supabase"] = {"ok": True}
+    except Exception as e:
+        result["supabase"] = {"ok": False, "error": str(e)[:300]}
+    return result
+
 @app.get("/api/cards")
 async def list_cards(user: dict = Depends(get_current_user)):
     res = (get_supabase().table("cards").select("*")
