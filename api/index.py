@@ -1,33 +1,184 @@
 import os
-from fastapi import FastAPI
+import re
+import json
+import hmac
+import hashlib
+import logging
+from datetime import date, timedelta, datetime, timezone
+from functools import lru_cache
+from typing import Optional
+from urllib.parse import parse_qs
+
+from fastapi import FastAPI, Depends, HTTPException, Request, Security, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from mangum import Mangum
-from .cards import router as cards_router
-from .cron_notify import router as cron_router
+from pydantic import BaseModel, Field, field_validator
+from supabase import create_client, Client
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("sim-sim")
+
+# ================= Supabase =================
+@lru_cache()
+def get_supabase() -> Client:
+    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+
+# ================= Telegram auth =================
+tg_header = APIKeyHeader(name="X-Telegram-Init-Data", auto_error=False)
+
+def verify_init_data(init_data: str) -> dict:
+    if not init_data:
+        raise HTTPException(status_code=401, detail="Missing initData")
+    parsed = parse_qs(init_data, keep_blank_values=True)
+    received_hash = parsed.pop("hash", [None])[0]
+    if not received_hash:
+        raise HTTPException(status_code=401, detail="Missing hash")
+
+    data_check_string = "\n".join(f"{k}={parsed[k][0]}" for k in sorted(parsed.keys()))
+    secret_key = hmac.new(b"WebAppData", os.environ["TELEGRAM_BOT_TOKEN"].encode(), hashlib.sha256).digest()
+    calculated = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated, received_hash):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    auth_date = int(parsed.get("auth_date", ["0"])[0])
+    if datetime.now(timezone.utc).timestamp() - auth_date > 86400:
+        raise HTTPException(status_code=401, detail="Init data expired")
+
+    user_str = parsed.get("user", [None])[0]
+    if not user_str:
+        raise HTTPException(status_code=401, detail="No user in initData")
+    return json.loads(user_str)
+
+async def get_current_user(init_data: Optional[str] = Security(tg_header)) -> dict:
+    return verify_init_data(init_data or "")
+
+# ================= Helpers =================
+def _check(p: str) -> str:
+    if not re.match(r"^\+371\d{7,11}$", p):
+        raise ValueError("Invalid phone format")
+    return p
+
+def normalize_phone(raw: str) -> str:
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("00371"):
+        digits = digits[2:]
+    if digits.startswith("371"):
+        return _check("+" + digits)
+    if digits.startswith("2") and len(digits) == 8:
+        return _check("+371" + digits)
+    raise ValueError("Phone must be Latvian (+371)")
+
+def plural_days(n: int) -> str:
+    n = abs(n) % 100
+    if 10 < n < 20:
+        return "дней"
+    last = n % 10
+    if last == 1:
+        return "день"
+    if 2 <= last <= 4:
+        return "дня"
+    return "дней"
+
+# ================= Schema =================
+class CardIn(BaseModel):
+    phone_number: str
+    balance: float = Field(ge=0)
+    next_payment_date: date
+    note: Optional[str] = ""
+
+    @field_validator("phone_number")
+    @classmethod
+    def _norm(cls, v: str) -> str:
+        try:
+            return normalize_phone(v)
+        except ValueError as e:
+            raise ValueError(str(e))
+
+# ================= App =================
 app = FastAPI(title="SIM Card Tracker API")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://web.telegram.org",
-        "https://telegram.org",
-        "http://localhost:5173",
-        "http://localhost:8080",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.include_router(cards_router)
-app.include_router(cron_router)
-
 
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
 
+@app.get("/api/cards")
+async def list_cards(user: dict = Depends(get_current_user)):
+    res = (get_supabase().table("cards").select("*")
+           .eq("user_id", user["id"])
+           .order("next_payment_date", desc=False).execute())
+    return res.data or []
 
-# Vercel использует Mangum для запуска FastAPI как Lambda
+@app.post("/api/cards", status_code=status.HTTP_201_CREATED)
+async def create_card(card: CardIn, user: dict = Depends(get_current_user)):
+    sb = get_supabase()
+    existing = (sb.table("cards").select("id")
+                .eq("user_id", user["id"])
+                .eq("phone_number", card.phone_number).execute())
+    if existing.data:
+        raise HTTPException(status_code=409, detail="Этот номер уже добавлен")
+    payload = {**card.model_dump(), "user_id": user["id"]}
+    res = sb.table("cards").insert(payload).execute()
+    return res.data[0]
+
+@app.put("/api/cards/{card_id}")
+async def update_card(card_id: int, card: CardIn, user: dict = Depends(get_current_user)):
+    res = (get_supabase().table("cards").update(card.model_dump())
+           .eq("id", card_id).eq("user_id", user["id"]).execute())
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Карта не найдена")
+    return res.data[0]
+
+@app.delete("/api/cards/{card_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_card(card_id: int, user: dict = Depends(get_current_user)):
+    res = (get_supabase().table("cards").delete()
+           .eq("id", card_id).eq("user_id", user["id"]).execute())
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Карта не найдена")
+
+# ================= Cron notifications =================
+@app.post("/api/cron_notify")
+async def cron_notify(request: Request):
+    if os.environ.get("VERCEL") == "1" and not request.headers.get("x-vercel-cron"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from aiogram import Bot
+    from aiogram.exceptions import TelegramForbiddenError
+
+    sb = get_supabase()
+    bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
+    today = date.today()
+    sent = 0
+    try:
+        for offset in (3, 1, 0):
+            target = today + timedelta(days=offset)
+            res = sb.table("cards").select("*").eq("next_payment_date", target.isoformat()).execute()
+            for card in res.data or []:
+                word = plural_days(offset)
+                head = {0: "🔴 СРОЧНО! Срок аванса истекает сегодня!",
+                        1: "⚠️ Требуется пополнение!",
+                        3: f"⚠️ Осталось {offset} {word} до оплаты"}[offset]
+                msg = (f"{head}\n\n📱 Номер: {card['phone_number']}\n"
+                       f"💰 Баланс: {float(card['balance']):.2f} €\n"
+                       f"⏳ Осталось: {offset} {word} (до {target.strftime('%d.%m.%Y')})\n")
+                if card.get("note"):
+                    msg += f"📝 Заметка: {card['note']}"
+                try:
+                    await bot.send_message(chat_id=card["user_id"], text=msg)
+                    sent += 1
+                except TelegramForbiddenError:
+                    log.warning("User %s не запустил бота", card["user_id"])
+                except Exception as e:
+                    log.error("Send failed: %s", e)
+    finally:
+        await bot.session.close()
+    return {"ok": True, "sent": sent}
+
+# Vercel entry point
 handler = Mangum(app, lifespan="off")

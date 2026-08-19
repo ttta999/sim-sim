@@ -22,8 +22,8 @@ async function request(method, path, body) {
 }
 
 export const api = {
-    listCards: () => request("GET", "/api/cards/"),
-    createCard: (data) => request("POST", "/api/cards/", data),
+    listCards: () => request("GET", "/api/cards"),
+    createCard: (data) => request("POST", "/api/cards", data),
     updateCard: (id, data) => request("PUT", `/api/cards/${id}`, data),
     deleteCard: (id) => request("DELETE", `/api/cards/${id}`),
 };
