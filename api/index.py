@@ -111,7 +111,7 @@ def health():
 @app.get("/api/debug")
 async def debug():
     result = {"env": {}}
-    for var in ("TELEGRAM_BOT_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"):
+    for var in ("TELEGRAM_BOT_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "CRON_SECRET"):
         val = os.environ.get(var)
         result["env"][var] = {"present": bool(val), "length": len(val) if val else 0}
     try:
@@ -157,10 +157,18 @@ async def delete_card(card_id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Карта не найдена")
 
 # ================= Cron notifications =================
-@app.post("/api/cron_notify")
+# ВАЖНО: Vercel Cron всегда отправляет GET-запрос (не POST!), и не использует
+# заголовок "x-vercel-cron" (такого не существует). Защита идёт через
+# CRON_SECRET, который Vercel автоматически подставляет как
+# "Authorization: Bearer <CRON_SECRET>", если эта переменная задана
+# в Project Settings -> Environment Variables.
+@app.get("/api/cron_notify")
 async def cron_notify(request: Request):
-    if os.environ.get("VERCEL") == "1" and not request.headers.get("x-vercel-cron"):
-        raise HTTPException(status_code=403, detail="Forbidden")
+    if os.environ.get("VERCEL") == "1":
+        auth = request.headers.get("authorization")
+        expected = f"Bearer {os.environ.get('CRON_SECRET')}"
+        if not os.environ.get("CRON_SECRET") or auth != expected:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     from aiogram import Bot
     from aiogram.exceptions import TelegramForbiddenError
