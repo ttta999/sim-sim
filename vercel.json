@@ -1,7 +1,4 @@
 {
-  "rewrites": [
-    { "source": "/api/:path*", "destination": "/api/index" }
-  ],
   "crons": [
     { "path": "/api/cron_notify", "schedule": "0 6 * * *" }
   ]
